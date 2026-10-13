@@ -1,0 +1,36 @@
+[project]
+name = "pixvod"
+version = "0.1.0"
+description = "PixVOD: Pixel-Distributed Direct Visual Odometry and Depth Estimation"
+requires-python = "==3.10.*"
+# Pinned to the versions of the conda env jax-of that produced the references: the same JAX/XLA and CUDA
+# libraries give the same kernels, so the results can be compared byte for byte.
+dependencies = [
+    "jax==0.6.2",
+    "jaxlib==0.6.2",
+    "jax-cuda12-plugin==0.6.2",
+    "jax-cuda12-pjrt==0.6.2",
+    "nvidia-cublas-cu12==12.9.1.4",
+    "nvidia-cuda-cupti-cu12==12.9.79",
+    "nvidia-cuda-nvcc-cu12==12.9.86",
+    "nvidia-cuda-nvrtc-cu12==12.9.86",
+    "nvidia-cuda-runtime-cu12==12.9.79",
+    "nvidia-cudnn-cu12==9.10.2.21",
+    "nvidia-cufft-cu12==11.4.1.4",
+    "nvidia-cusolver-cu12==11.7.5.82",
+    "nvidia-cusparse-cu12==12.5.10.65",
+    "nvidia-nccl-cu12==2.27.3",
+    "nvidia-nvjitlink-cu12==12.9.86",
+    "nvidia-nvshmem-cu12==3.4.5",
+    "ml-dtypes==0.5.3",
+    "numpy==1.26.4",
+    "scipy==1.15.2",
+    "numexpr==2.10.2",
+    "opencv-python==4.11.0.86",
+    "matplotlib==3.10.0",
+    "pyyaml==6.0.2",
+    "rerun-sdk==0.23.0",
+]
+
+[tool.uv]
+package = false

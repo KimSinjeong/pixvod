@@ -1,0 +1,53 @@
+# 150 targets x 100 iterations.  Model gates: gbp_engine/defaults.py (champion: champion gates, float32, TF32);
+# PIXVOD_BASELINE=legacy gives the previous default (float64, no gate set).
+# Initial depth preparation (photo_warmup) is separate from the target budget.
+experiment_name: pixvod
+images_dir: data/replica_office2_128
+trajectory_path: data/Replica/office2/traj_sub.txt
+start_frame: 12000
+output_root: ./experiments
+iteration_log_interval: 100
+intrinsic:
+- 109.985
+- 0
+- 63.5
+- 0
+- 109.985
+- 63.5
+- 0
+- 0
+- 1
+cut: 0
+resolution_x: 128
+resolution_y: 128
+seed: 0
+alpha: 0.7
+photo_warmup: 1000
+disable_photometric: false
+prior_init_axis_angle:
+- 0.0
+- 0.0
+- 0.0
+- 0.0
+- 0.0
+- 0.0
+hyperparameters:
+- at: 0
+  dataterm_s: 0.005
+  ratio_s: 0.5
+  smoothness_s_tr: 4e-4
+  smoothness_s_rot: 4e-4
+  prior_boundary_s: 0.25
+  prior_s: 1.0
+  prior_s_depth: 0.1
+  normal_s: 0.003
+  use_robust: true
+  robust_thres: 400
+  use_robust_d: false
+  robust_function_type: 0
+  robust_prior_thres: 0.1
+target_frames: 150
+iterations_per_target: 100
+student_t_nu: 10
+predictive_variance_scale: 400
+weight_update_interval: 25

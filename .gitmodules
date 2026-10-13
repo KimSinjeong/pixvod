@@ -1,0 +1,6 @@
+[submodule "third_party/Replica-Dataset"]
+	path = third_party/Replica-Dataset
+	url = https://github.com/facebookresearch/Replica-Dataset.git
+[submodule "third_party/DSINE"]
+	path = third_party/DSINE
+	url = https://github.com/baegwangbin/DSINE.git

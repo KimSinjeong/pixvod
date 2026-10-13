@@ -1,0 +1,466 @@
+diff --git a/ReplicaSDK/include/PTexLib.h b/ReplicaSDK/include/PTexLib.h
+index aa78514..521d0aa 100644
+--- a/ReplicaSDK/include/PTexLib.h
++++ b/ReplicaSDK/include/PTexLib.h
+@@ -42,6 +42,11 @@ class PTexMesh {
+     const float depthScale=1.0f,
+     const Eigen::Vector4f& clipPlane = Eigen::Vector4f(0.0f, 0.0f, 0.0f, 0.0f));
+ 
++  // Render surface normals in camera coordinates (RDF), encoded as RGB in [0,1]
++  void RenderNormals(
++      const pangolin::OpenGlRenderState& cam,
++      const Eigen::Vector4f& clipPlane = Eigen::Vector4f(0.0f, 0.0f, 0.0f, 0.0f));
++
+   float Exposure() const;
+   void SetExposure(const float& val);
+ 
+@@ -61,6 +66,7 @@ class PTexMesh {
+     pangolin::GlBuffer vbo;
+     pangolin::GlBuffer ibo;
+     pangolin::GlBuffer abo;
++    pangolin::GlBuffer nbo; // vertex normals
+   };
+ 
+   static std::vector<MeshData> SplitMesh(const MeshData& mesh, const float splitSize);
+@@ -74,6 +80,7 @@ class PTexMesh {
+ 
+   pangolin::GlSlProgram shader;
+   pangolin::GlSlProgram depthShader;
++  pangolin::GlSlProgram normalShader;
+ 
+   float exposure = 1.0f;
+   float gamma = 1.0f;
+diff --git a/ReplicaSDK/ptex/PTexLib.cpp b/ReplicaSDK/ptex/PTexLib.cpp
+index 7d4bdf4..f8042e9 100644
+--- a/ReplicaSDK/ptex/PTexLib.cpp
++++ b/ReplicaSDK/ptex/PTexLib.cpp
+@@ -55,6 +55,11 @@ PTexMesh::PTexMesh(const std::string& meshFile, const std::string& atlasFolder)
+   depthShader.AddShaderFromFile(pangolin::GlSlVertexShader, shadir + "/mesh-depth.vert", {}, {shadir});
+   depthShader.AddShaderFromFile(pangolin::GlSlFragmentShader, shadir + "/mesh-depth.frag", {}, {shadir});
+   depthShader.Link();
++
++  // Normal rendering shader (camera-space normals encoded to RGB)
++  normalShader.AddShaderFromFile(pangolin::GlSlVertexShader, shadir + "/mesh-normal.vert", {}, {shadir});
++  normalShader.AddShaderFromFile(pangolin::GlSlFragmentShader, shadir + "/mesh-normal.frag", {}, {shadir});
++  normalShader.Link();
+ }
+ 
+ PTexMesh::~PTexMesh() {}
+@@ -161,6 +166,48 @@ void PTexMesh::RenderSubMeshDepth(
+ }
+ 
+ 
++// Render normals (camera-space) for all submeshes
++void PTexMesh::RenderNormals(
++    const pangolin::OpenGlRenderState& cam,
++    const Eigen::Vector4f& clipPlane) {
++  for (size_t i = 0; i < meshes.size(); i++) {
++    Mesh& mesh = *meshes[i];
++
++    glPushAttrib(GL_POLYGON_BIT);
++    int currFrontFace;
++    glGetIntegerv(GL_FRONT_FACE, &currFrontFace);
++    glFrontFace(currFrontFace == GL_CW ? GL_CCW : GL_CW);
++
++    normalShader.Bind();
++    normalShader.SetUniform("MVP", cam.GetProjectionModelViewMatrix());
++    normalShader.SetUniform("MV", cam.GetModelViewMatrix());
++    normalShader.SetUniform("clipPlane", clipPlane(0), clipPlane(1), clipPlane(2), clipPlane(3));
++
++    mesh.vbo.Bind();
++    glVertexAttribPointer(0, mesh.vbo.count_per_element, mesh.vbo.datatype, GL_FALSE, 0, 0);
++    glEnableVertexAttribArray(0);
++    mesh.vbo.Unbind();
++
++    if (mesh.nbo.IsValid()) {
++      mesh.nbo.Bind();
++      glVertexAttribPointer(1, mesh.nbo.count_per_element, mesh.nbo.datatype, GL_FALSE, 0, 0);
++      glEnableVertexAttribArray(1);
++      mesh.nbo.Unbind();
++    }
++
++    mesh.ibo.Bind();
++    glDrawElements(GL_QUADS, mesh.ibo.num_elements, mesh.ibo.datatype, 0);
++    mesh.ibo.Unbind();
++
++    glDisableVertexAttribArray(0);
++    if (mesh.nbo.IsValid()) glDisableVertexAttribArray(1);
++
++    normalShader.Unbind();
++
++    glPopAttrib();
++  }
++}
++
+ void PTexMesh::Render(const pangolin::OpenGlRenderState& cam, const Eigen::Vector4f& clipPlane) {
+   for (size_t i = 0; i < meshes.size(); i++) {
+     RenderSubMesh(i, cam, clipPlane);
+@@ -470,6 +517,14 @@ void PTexMesh::LoadMeshData(const std::string& meshFile) {
+         GL_STATIC_DRAW);
+     meshes.back()->ibo.Upload(
+         splitMeshData[i].ibo.ptr, splitMeshData[i].ibo.Area() * sizeof(unsigned int));
++
++    // Upload normals if available
++    if (splitMeshData[i].nbo.Area() > 0) {
++      meshes.back()->nbo.Reinitialise(
++          pangolin::GlArrayBuffer, splitMeshData[i].nbo.Area(), GL_FLOAT, 4, GL_STATIC_DRAW);
++      meshes.back()->nbo.Upload(
++          splitMeshData[i].nbo.ptr, splitMeshData[i].nbo.Area() * sizeof(Eigen::Vector4f));
++    }
+   }
+   std::cout << "\rLoading mesh " << splitMeshData.size() << "/" << splitMeshData.size()
+             << "... done" << std::endl;
+diff --git a/ReplicaSDK/src/render.cpp b/ReplicaSDK/src/render.cpp
+index 901179a..875da88 100644
+--- a/ReplicaSDK/src/render.cpp
++++ b/ReplicaSDK/src/render.cpp
+@@ -1,4 +1,4 @@
+-// Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved
++// Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved.
+ #include <EGL.h>
+ #include <PTexLib.h>
+ #include <pangolin/image/image_convert.h>
+@@ -6,23 +6,162 @@
+ #include "GLCheck.h"
+ #include "MirrorRenderer.h"
+ 
++#include <vector>
++#include <fstream>
++#include <sstream>
++#include <cmath>
++#include <algorithm>
++
++std::vector<Eigen::Matrix4d> loadTrajectory(const std::string& filename) {
++    std::vector<Eigen::Matrix4d> trajectory;
++    std::ifstream file(filename);
++    if (!file.is_open()) {
++        std::cerr << "Error: Could not open trajectory file: " << filename << std::endl;
++        return trajectory;
++    }
++
++    std::string line;
++    while (std::getline(file, line)) {
++        std::stringstream ss(line);
++        Eigen::Matrix4d pose;
++        for (int i = 0; i < 4; ++i) {
++            for (int j = 0; j < 4; ++j) {
++                ss >> pose(i, j);
++            }
++        }
++        // NICE-SLAM exports camera-to-world transforms (T_wc).
++        // Pangolin's model-view expects world-to-camera (T_cw).
++        // Convert by inverting each pose before storing.
++        trajectory.push_back(pose.inverse());
++    }
++
++    return trajectory;
++}
++
++
++struct Intrinsics {
++  int width = 1280;
++  int height = 960;
++  double fx = 640.0;
++  double fy = 640.0;
++  double cx = (1280 - 1) / 2.0;
++  double cy = (960 - 1) / 2.0;
++  bool fromFov = false; // true if parsed via FoV format
++};
++
++static bool loadIntrinsicsFile(const std::string& filename, Intrinsics& I) {
++  std::ifstream f(filename);
++  if(!f.is_open()) return false;
++
++  // First line: W H
++  int W = 0, H = 0;
++  if(!(f >> W >> H)) return false;
++
++  // Try to read the rest of the line type
++  std::string secondLine;
++  std::getline(f, secondLine); // consume end of first line
++  if(!std::getline(f, secondLine)) return false;
++
++  std::stringstream ss(secondLine);
++
++  // Heuristic: if it begins with a letter, treat as FoV format; else try 9 numbers (K)
++  if(std::isalpha(ss.peek())) {
++    std::string fovType;
++    double fovDeg = 0.0;
++    ss >> fovType >> fovDeg;
++    double fovRad = fovDeg * M_PI / 180.0;
++    double cx = (W - 1) / 2.0;
++    double cy = (H - 1) / 2.0;
++    double fx = 0.0, fy = 0.0;
++    if(fovType != "vertical" && fovType != "horizontal") {
++      fovType = "horizontal"; // default
++    }
++    if(fovType == "horizontal") {
++      fx = cx / std::tan(fovRad * 0.5);
++      fy = fx; // square pixels
++    } else { // vertical
++      fy = cy / std::tan(fovRad * 0.5);
++      fx = fy;
++    }
++    I.width = W; I.height = H;
++    I.fx = fx; I.fy = fy; I.cx = cx; I.cy = cy;
++    I.fromFov = true;
++    return true;
++  } else {
++    // Try 9 numbers (row-major K)
++    double k11,k12,k13,k21,k22,k23,k31,k32,k33;
++    ss.clear();
++    ss.str(secondLine);
++    if(!(ss >> k11 >> k12 >> k13 >> k21 >> k22 >> k23 >> k31 >> k32 >> k33)) {
++      return false;
++    }
++    I.width = W; I.height = H;
++    I.fx = k11; I.fy = k22; I.cx = k13; I.cy = k23;
++    I.fromFov = false;
++    return true;
++  }
++}
+ 
+ int main(int argc, char* argv[]) {
+-  ASSERT(argc == 3 || argc == 4, "Usage: ./ReplicaRenderer mesh.ply /path/to/atlases [mirrorFile]");
++  ASSERT(argc >= 4, "Usage: ./ReplicaRenderer mesh.ply /path/to/atlases trajectory.txt [intrinsics.txt] [mirrorFile] [--exposure val]");
+ 
+   const std::string meshFile(argv[1]);
+   const std::string atlasFolder(argv[2]);
++  const std::string trajectoryFile(argv[3]);
+   ASSERT(pangolin::FileExists(meshFile));
+   ASSERT(pangolin::FileExists(atlasFolder));
++  ASSERT(pangolin::FileExists(trajectoryFile));
+ 
++  std::string intrinsicsFile;
+   std::string surfaceFile;
+-  if (argc == 4) {
+-    surfaceFile = std::string(argv[3]);
+-    ASSERT(pangolin::FileExists(surfaceFile));
++  bool hasExposure = false;
++  float exposureVal = 0.0f;
++
++  // Parse remaining optional args: intrinsics file, mirror file, and flags
++  for (int i = 4; i < argc; ++i) {
++    std::string arg(argv[i]);
++    if (arg == "--exposure" || arg == "-e") {
++      i++;
++      ASSERT(i < argc, "Missing value for --exposure");
++      try {
++        exposureVal = std::stof(std::string(argv[i]));
++        hasExposure = true;
++      } catch (...) {
++        ASSERT(false, "Invalid value for --exposure");
++      }
++      continue;
++    }
++    // Backward-compatible positional handling
++    if (arg.size() >= 4 && (arg.find(".sur") != std::string::npos || arg.find(".json") != std::string::npos)) {
++      if (surfaceFile.empty()) {
++        surfaceFile = arg;
++      } else {
++        std::cerr << "Warning: Multiple mirror files provided, using '" << surfaceFile << "' and ignoring '" << arg << "'" << std::endl;
++      }
++      continue;
++    }
++    if (pangolin::FileExists(arg)) {
++      if (intrinsicsFile.empty()) {
++        intrinsicsFile = arg;
++      } else if (surfaceFile.empty()) {
++        surfaceFile = arg;
++      } else {
++        std::cerr << "Warning: Extra file argument '" << arg << "' ignored." << std::endl;
++      }
++      continue;
++    }
++    std::cerr << "Warning: Unrecognized option '" << arg << "' ignored." << std::endl;
+   }
++  if (!surfaceFile.empty()) ASSERT(pangolin::FileExists(surfaceFile));
++  if (!intrinsicsFile.empty()) ASSERT(pangolin::FileExists(intrinsicsFile));
+ 
+-  const int width = 1280;
+-  const int height = 960;
++  Intrinsics intr;
++  if (!intrinsicsFile.empty()) {
++    bool ok = loadIntrinsicsFile(intrinsicsFile, intr);
++    ASSERT(ok, "Failed to parse intrinsics file");
++  }
++  const int width = intr.width;
++  const int height = intr.height;
+   bool renderDepth = true;
+   float depthScale = 65535.0f * 0.1f;
+ 
+@@ -47,26 +186,35 @@ int main(int argc, char* argv[]) {
+   pangolin::GlTexture depthTexture(width, height, GL_R32F, false, 0, GL_RED, GL_FLOAT, 0);
+   pangolin::GlFramebuffer depthFrameBuffer(depthTexture, renderBuffer);
+ 
++  // Normal buffer (RGB32F)
++  pangolin::GlTexture normalTexture(width, height, GL_RGB32F, false, 0, GL_RGB, GL_FLOAT, 0);
++  pangolin::GlFramebuffer normalFrameBuffer(normalTexture, renderBuffer);
++
+   // Setup a camera
+   pangolin::OpenGlRenderState s_cam(
+       pangolin::ProjectionMatrixRDF_BottomLeft(
+           width,
+           height,
+-          width / 2.0f,
+-          width / 2.0f,
+-          (width - 1.0f) / 2.0f,
+-          (height - 1.0f) / 2.0f,
++          (float)intr.fx,
++          (float)intr.fy,
++          (float)intr.cx,
++          (float)intr.cy,
+           0.1f,
+           100.0f),
+       pangolin::ModelViewLookAtRDF(0, 0, 4, 0, 0, 0, 0, 1, 0));
+ 
+-  // Start at some origin
+-  Eigen::Matrix4d T_camera_world = s_cam.GetModelViewMatrix();
+-
+-  // And move to the left
+-  Eigen::Matrix4d T_new_old = Eigen::Matrix4d::Identity();
++  if (!intrinsicsFile.empty() && intr.fromFov) {
++    std::cout << "Intrinsics (from FoV) K =\n"
++              << intr.fx << " 0 " << intr.cx << "\n"
++              << "0 " << intr.fy << " " << intr.cy << "\n"
++              << "0 0 1" << std::endl;
++  }
+ 
+-  T_new_old.topRightCorner(3, 1) = Eigen::Vector3d(0.025, 0, 0);
++  // Load trajectory
++  std::vector<Eigen::Matrix4d> trajectory = loadTrajectory(trajectoryFile);
++  if (trajectory.empty()) {
++      return 1; // Exit if trajectory file failed to load
++  }
+ 
+   // load mirrors
+   std::vector<MirrorSurface> mirrors;
+@@ -86,17 +234,34 @@ int main(int argc, char* argv[]) {
+ 
+   // load mesh and textures
+   PTexMesh ptexMesh(meshFile, atlasFolder);
++  if (hasExposure) {
++    // Clamp to the same scale as the Viewer slider [0.0, 0.1]
++    float clamped = std::max(0.0f, std::min(0.1f, exposureVal));
++    if (std::abs(clamped - exposureVal) > 1e-9f) {
++      std::cerr << "Warning: exposure clamped to " << clamped << " (Viewer scale is [0.0, 0.1])" << std::endl;
++    }
++    ptexMesh.SetExposure(clamped);
++    std::cout << "Exposure set to " << clamped << std::endl;
++  } else {
++    // Match Viewer default exposure value
++    ptexMesh.SetExposure(0.01f);
++  }
+ 
+   pangolin::ManagedImage<Eigen::Matrix<uint8_t, 3, 1>> image(width, height);
+   pangolin::ManagedImage<float> depthImage(width, height);
+   pangolin::ManagedImage<uint16_t> depthImageInt(width, height);
++  pangolin::ManagedImage<Eigen::Matrix<float, 3, 1>> normalImage(width, height);
++  pangolin::ManagedImage<Eigen::Matrix<uint16_t, 3, 1>> normalImageInt(width, height);
+ 
+   // Render some frames
+-  const size_t numFrames = 100;
++  const size_t numFrames = trajectory.size();
+   for (size_t i = 0; i < numFrames; i++) {
+     std::cout << "\rRendering frame " << i + 1 << "/" << numFrames << "... ";
+     std::cout.flush();
+ 
++    // Set camera pose from trajectory
++    s_cam.SetModelViewMatrix(pangolin::OpenGlMatrix(trajectory[i]));
++
+     // Render
+     frameBuffer.Bind();
+     glPushAttrib(GL_VIEWPORT_BIT);
+@@ -168,13 +333,38 @@ int main(int argc, char* argv[]) {
+           std::string(filename), true, 34.0f);
+     }
+ 
+-    // Move the camera
+-    T_camera_world = T_camera_world * T_new_old.inverse();
++    // render normals (BINI convention: camera-space RDF, encoded to [0,1])
++    normalFrameBuffer.Bind();
++    glPushAttrib(GL_VIEWPORT_BIT);
++    glViewport(0, 0, width, height);
++    glClear(GL_DEPTH_BUFFER_BIT | GL_COLOR_BUFFER_BIT);
+ 
+-    s_cam.GetModelViewMatrix() = T_camera_world;
++    glEnable(GL_CULL_FACE);
++    ptexMesh.RenderNormals(s_cam);
++    glDisable(GL_CULL_FACE);
++
++    glPopAttrib(); //GL_VIEWPORT_BIT
++    normalFrameBuffer.Unbind();
++
++    normalTexture.Download(normalImage.ptr, GL_RGB, GL_FLOAT);
++
++    // convert to 16-bit RGB (0..1 -> 0..65535)
++    for(size_t iPix = 0; iPix < normalImage.Area(); iPix++) {
++      Eigen::Matrix<float,3,1>& f = normalImage[iPix];
++      Eigen::Matrix<uint16_t,3,1> u;
++      u(0) = static_cast<uint16_t>(std::max(0.0f, std::min(65535.0f, f(0) * 65535.0f + 0.5f)));
++      u(1) = static_cast<uint16_t>(std::max(0.0f, std::min(65535.0f, f(1) * 65535.0f + 0.5f)));
++      u(2) = static_cast<uint16_t>(std::max(0.0f, std::min(65535.0f, f(2) * 65535.0f + 0.5f)));
++      normalImageInt[iPix] = u;
++    }
++
++    snprintf(filename, 1000, "normal%06zu.png", i);
++    pangolin::SaveImage(
++        normalImageInt.UnsafeReinterpret<uint8_t>(),
++        pangolin::PixelFormatFromString("RGB48"),
++        std::string(filename), true, 34.0f);
+   }
+   std::cout << "\rRendering frame " << numFrames << "/" << numFrames << "... done" << std::endl;
+ 
+   return 0;
+-}
+-
++}
+\ No newline at end of file
+diff --git a/ReplicaSDK/shaders/mesh-normal.vert b/ReplicaSDK/shaders/mesh-normal.vert
+new file mode 100644
+index 0000000..a7e5b8d
+--- /dev/null
++++ b/ReplicaSDK/shaders/mesh-normal.vert
+@@ -0,0 +1,20 @@
++// Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved
++#version 430 core
++
++layout(location = 0) in vec4 position;
++layout(location = 1) in vec4 normal;
++
++uniform mat4 MV, MVP;
++uniform vec4 clipPlane;
++
++out vec3 n_cam;
++
++void main()
++{
++    // Transform to camera space (RDF convention)
++    n_cam = normalize((MV * vec4(normal.xyz, 0.0)).xyz);
++    gl_ClipDistance[0] = dot(position, clipPlane);
++    gl_Position = MVP * position;
++}
++
++
+diff --git a/ReplicaSDK/shaders/mesh-normal.frag b/ReplicaSDK/shaders/mesh-normal.frag
+new file mode 100644
+index 0000000..9cdc2b4
+--- /dev/null
++++ b/ReplicaSDK/shaders/mesh-normal.frag
+@@ -0,0 +1,16 @@
++// Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved
++#version 430 core
++
++layout(location = 0) out vec4 FragColor;
++
++in vec3 n_cam;
++
++void main()
++{
++    // Encode camera-space normal (RDF) into RGB in [0,1] as in typical normal maps
++    vec3 n = normalize(n_cam);
++    vec3 rgb = 0.5 * (n + vec3(1.0));
++    FragColor = vec4(rgb, 1.0f);
++}
++
++
