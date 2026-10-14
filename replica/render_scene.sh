@@ -4,7 +4,7 @@
 #   usage: render_scene.sh <scene, e.g. office2> <replica_v1 dir> <trajectory> <out dir> [<first index> <count>]
 # The renderer names files 0..K-1 by trajectory line; with <first index> <count> only that range of the trajectory is
 # rendered and the files are renamed to their index in the full trajectory (the name the pipeline reads).
-# A full scene (23,989 poses) takes about 1.5 h.
+# A full scene (19,991 poses for N = 9) takes about 1.25 h.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 RENDERER="$ROOT/third_party/Replica-Dataset/build/ReplicaSDK/ReplicaRenderer"
